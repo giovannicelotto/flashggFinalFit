@@ -91,6 +91,141 @@ RooAbsPdf* PdfModelBuilder::getChebychev(string prefix, int order){
 
 }
 
+RooAbsPdf* PdfModelBuilder::getPEBern(string prefix, int order) {
+
+  // Bernstein basis polynomials of degree n on [xmin, xmax]
+  // B_{i,n}(x) = C(n,i) * t^i * (1-t)^(n-i)  where t = (x - xmin)/(xmax - xmin)
+  // We use order-1 degree Bernstein (order coefficients -> degree order-1)
+  int degree = order - 1;
+
+  // t = (x - xmin)/(xmax - xmin)  mapped to [0,1]
+  double xmin = obs_var->getMin();
+  double xmax = obs_var->getMax();
+
+  RooFormulaVar *tvar = new RooFormulaVar(
+      Form("%s_tvar", prefix.c_str()),
+      Form("%s_tvar", prefix.c_str()),
+      Form("(@0 - %f)/(%f - %f)", xmin, xmax, xmin),
+      RooArgList(*obs_var)
+  );
+
+  // Build Bernstein basis terms c_i * B_{i,n}(t)
+  RooArgList polyTerms;
+  for (int i = 0; i <= degree; i++) {
+    string name = Form("%s_c%d", prefix.c_str(), i);
+    RooRealVar *coeff = new RooRealVar(name.c_str(), name.c_str(), 0.01*(i+1), -10., 10.);
+    params.insert(pair<string,RooRealVar*>(name, coeff));
+
+    // Binomial coefficient C(degree, i)
+    int binom = 1;
+    for (int k = 0; k < i; k++)
+      binom = binom * (degree - k) / (k + 1); 
+
+    // B_{i,degree}(t) = C(degree,i) * t^i * (1-t)^(degree-i)
+    string termName = Form("%s_term%d", prefix.c_str(), i);
+    string formula;
+    if (i == 0 && degree - i == 0)
+      formula = Form("@0 * %d", binom);
+    else if (i == 0)
+      formula = Form("@0 * %d * pow(1-@1, %d)", binom, degree-i);
+    else if (degree - i == 0)
+      formula = Form("@0 * %d * pow(@1, %d)", binom, i);
+    else
+      formula = Form("@0 * %d * pow(@1, %d) * pow(1-@1, %d)", binom, i, degree-i);
+
+    RooFormulaVar *term = new RooFormulaVar(
+        termName.c_str(), termName.c_str(),
+        formula.c_str(),
+        RooArgList(*coeff, *tvar));
+
+    prods.insert(pair<string,RooFormulaVar*>(termName, term));
+    polyTerms.add(*term);
+  }
+
+  // Sum all Bernstein terms: @0 + @1 + ...
+  std::string sumExpr;
+  for (int i = 0; i <= degree; i++) {
+    if (i > 0) sumExpr += " + ";
+    sumExpr += Form("@%d", i);
+  }
+
+  RooFormulaVar *polySum = new RooFormulaVar(
+      Form("%s_polySum", prefix.c_str()),
+      Form("%s_polySum", prefix.c_str()),
+      sumExpr.c_str(),
+      polyTerms
+  );
+
+  RooGenericPdf *polExpo = new RooGenericPdf(
+      prefix.c_str(), prefix.c_str(),
+      "exp(@0)",
+      RooArgList(*polySum)
+  );
+
+  return polExpo;
+}
+
+RooAbsPdf* PdfModelBuilder::getPolExpo(string prefix, int order) {
+  
+  // Define transformed observable x = (mass - 150)/90
+  RooFormulaVar *xvar = new RooFormulaVar(
+      Form("%s_xvar", prefix.c_str()),
+      Form("%s_xvar", prefix.c_str()),
+      "(@0 - 150.0)/90.0",
+      RooArgList(*obs_var)
+  );
+
+  // Build list of polynomial terms
+  RooArgList polyTerms;
+  for (int i = 0; i < order; i++) {
+    string name = Form("%s_c%d", prefix.c_str(), i);
+    RooRealVar *coeff = nullptr;
+
+    if (order == 0)
+      coeff = new RooRealVar(name.c_str(), name.c_str(), -0.01 * (i + 1), -10., 0.);
+    else
+      coeff = new RooRealVar(name.c_str(), name.c_str(), 0.01 * (i + 1), -10., 10.);
+
+    params.insert(pair<string, RooRealVar*>(name, coeff));
+
+    // term = c_i * x^(i+1)
+    string termName = Form("%s_term%d", prefix.c_str(), i);
+    string formula = Form("@0 * pow(@1, %d)", i + 1);
+    RooFormulaVar *term = new RooFormulaVar(termName.c_str(), termName.c_str(), formula.c_str(), RooArgList(*coeff, *xvar));
+
+    prods.insert(pair<string, RooFormulaVar*>(termName, term));
+    polyTerms.add(*term);
+  }
+
+  // Build sum expression dynamically: @0 + @1 + ...
+  std::string sumExpr;
+  for (int i = 0; i < order; i++) {
+    if (i > 0) sumExpr += " + ";
+    sumExpr += Form("@%d", i);
+  }
+
+  RooFormulaVar *polySum = new RooFormulaVar(
+      Form("%s_polySum", prefix.c_str()),
+      Form("%s_polySum", prefix.c_str()),
+      sumExpr.c_str(),
+      polyTerms
+  );
+
+  // Build the exponential PDF
+  // IMPORTANT: use "exp(@0)" as the formula string!
+  RooGenericPdf *polExpo = new RooGenericPdf(
+      prefix.c_str(),
+      prefix.c_str(),
+      "exp(@0)",
+      RooArgList(*polySum)
+  );
+
+  return polExpo;
+}
+
+
+
+
 RooAbsPdf* PdfModelBuilder::getBernstein(string prefix, int order){
   
   RooArgList *coeffList = new RooArgList();
@@ -141,6 +276,10 @@ RooAbsPdf* PdfModelBuilder::getPowerLawGeneric(string prefix, int order){
     return NULL;
   }
   else {
+    //
+    // Power Law1   0 fraction  1 pow
+    // Power Law3   1 fraction  2 pow
+    // Power Law5 
     int nfracs=(order-1)/2;
     int npows=order-nfracs;
     assert(nfracs==npows-1);
@@ -210,7 +349,7 @@ RooAbsPdf* PdfModelBuilder::getExponential(string prefix, int order){
     double low=-2.;
     double high=0.;
     if (order>0){
-      start=-0.001/double(i);
+      start=-0.01/double(i);
       low=-0.01;
       high=0.01;
     }
@@ -224,11 +363,16 @@ RooAbsPdf* PdfModelBuilder::getExponential(string prefix, int order){
 }
 
 RooAbsPdf* PdfModelBuilder::getPowerLawSingle(string prefix, int order){
+
   
   if (order%2==0){
     cerr << "ERROR -- addPowerLaw -- only odd number of params allowed" << endl;
     return NULL;
   }
+      //
+    // Power Law1   0 fraction  1 pow
+    // Power Law3   1 fraction  2 pow
+    // Power Law5   2 fraction  3 pow
   else {
     int nfracs=(order-1)/2;
     int npows=order-nfracs;
@@ -237,14 +381,14 @@ RooAbsPdf* PdfModelBuilder::getPowerLawSingle(string prefix, int order){
     RooArgList *pows = new RooArgList();
     for (int i=1; i<=nfracs; i++){
       string name =  Form("%s_f%d",prefix.c_str(),i);
-      params.insert(pair<string,RooRealVar*>(name, new RooRealVar(name.c_str(),name.c_str(),0.9-float(i-1)*1./nfracs,0.,1.)));
+      params.insert(pair<string,RooRealVar*>(name, new RooRealVar(name.c_str(),name.c_str(),0.9-float(i-1)*1./nfracs,0.005,0.995)));
       //params[name]->removeRange();
       fracs->add(*params[name]);
     }
     for (int i=1; i<=npows; i++){
       string name =  Form("%s_p%d",prefix.c_str(),i);
       string ename =  Form("%s_e%d",prefix.c_str(),i);
-      params.insert(pair<string,RooRealVar*>(name, new RooRealVar(name.c_str(),name.c_str(),TMath::Max(-9.,-1.*(i+1)),-9.,1.)));
+      params.insert(pair<string,RooRealVar*>(name, new RooRealVar(name.c_str(),name.c_str(),-1/double(i),-9.,1.)));
       //params[name]->removeRange();
       utilities.insert(pair<string,RooAbsPdf*>(ename, new RooPower(ename.c_str(),ename.c_str(),*obs_var,*params[name])));
       pows->add(*utilities[ename]);
@@ -346,13 +490,13 @@ RooAbsPdf* PdfModelBuilder::getExponentialSingle(string prefix, int order){
     RooArgList *exps = new RooArgList();
     for (int i=1; i<=nfracs; i++){
       string name =  Form("%s_f%d",prefix.c_str(),i);
-      params.insert(pair<string,RooRealVar*>(name, new RooRealVar(name.c_str(),name.c_str(),0.9-float(i-1)*1./nfracs,0.0001,0.9999)));
+      params.insert(pair<string,RooRealVar*>(name, new RooRealVar(name.c_str(),name.c_str(),0.9-float(i-1)*1./nfracs,0.01,0.99)));
       fracs->add(*params[name]);
     }
     for (int i=1; i<=nexps; i++){
       string name =  Form("%s_p%d",prefix.c_str(),i);
       string ename =  Form("%s_e%d",prefix.c_str(),i);
-      params.insert(pair<string,RooRealVar*>(name, new RooRealVar(name.c_str(),name.c_str(),TMath::Max(-1.,-0.04*(i+1)),-1.,0.)));
+      params.insert(pair<string,RooRealVar*>(name, new RooRealVar(name.c_str(),name.c_str(),TMath::Max(-0.6,-0.04*(i+1)), -0.6, -0.)));
       utilities.insert(pair<string,RooAbsPdf*>(ename, new RooExponential(ename.c_str(),ename.c_str(),*obs_var,*params[name])));
       exps->add(*utilities[ename]);
     }
@@ -385,6 +529,8 @@ void PdfModelBuilder::addBkgPdf(string type, int nParams, string name, bool cach
   RooAbsPdf *pdf=0;// avoid uninitialised variable error in cmssw  
 
   if (type=="Bernstein") pdf = getBernstein(name,nParams);
+  if (type=="PolExpo") pdf = getPolExpo(name,nParams);
+  if (type=="PolExpoBern") pdf = getPEBern(name,nParams);
   if (type=="Exponential") pdf = getExponentialSingle(name,nParams);
   if (type=="PowerLaw") pdf = getPowerLawSingle(name,nParams);
   if (type=="Laurent") pdf = getLaurentSeries(name,nParams);
